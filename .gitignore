@@ -29,3 +29,9 @@ docs/
 
 # Plugin-installed skills (e.g. codex symlinks)
 superpowers/
+# Symlink into the shared ~/.agents/skills store; the target is an
+# absolute machine-local path, so the link cannot be shared.
+frontend-design
+
+# Installed by `npm install` inside md-publish; the lockfile is tracked.
+node_modules/
