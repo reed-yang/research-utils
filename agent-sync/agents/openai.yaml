@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent Sync"
+  short_description: "Sync agent profiles safely"
+  default_prompt: "Use $agent-sync to plan and verify a safe Claude Code, Codex, R2, or SSH profile sync."

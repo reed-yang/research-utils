@@ -1,0 +1,4 @@
+interface:
+  display_name: "Pre-Compact"
+  short_description: "Preserve project state before context compaction"
+  default_prompt: "Use $pre-compact to reconcile project documentation, create a session checkpoint, and give me a paste-ready post-compact resume prompt."

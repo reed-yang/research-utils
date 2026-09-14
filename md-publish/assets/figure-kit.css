@@ -1,0 +1,150 @@
+/*
+ * figure-kit.css — design tokens and components for model-designed figures,
+ * derived from (and loaded after) the Typora-github theme in style.css.
+ * FIGURES.md documents when and how to use each piece.
+ */
+
+:root {
+    /* ink & chrome (from the theme) */
+    --mp-ink: #333333;
+    --mp-muted: #777777;
+    --mp-border: #dfe2e5;
+    --mp-fill: #f8f8f8;
+    --mp-fill-soft: #fafafa;
+
+    /* accent = theme link blue; categorical ramp = Okabe-Ito, colorblind-safe */
+    --mp-accent: #4183C4;
+    --mp-c1: #4183C4;  /* blue (primary series / measured) */
+    --mp-c2: #E69F00;  /* orange */
+    --mp-c3: #009E73;  /* green (ok / accepted / fix) */
+    --mp-c4: #CC79A7;  /* mauve */
+    --mp-c5: #56B4E9;  /* sky (secondary / estimated) */
+    --mp-c6: #D55E00;  /* vermillion (error / rejected / warning) */
+}
+
+/* ---------- figures ---------- */
+
+.mp-figure {
+    margin: 1.6em 0;
+    text-align: center;
+}
+.mp-figure svg {
+    max-width: 100%;
+    height: auto;
+    font-family: inherit; /* inlined SVG inherits the page's font stack */
+}
+/* Belt-and-suspenders: Safari mis-positions KaTeX's clip-hidden MathML layer
+   inside foreignObject (formulas paint twice, misaligned). Figure math is
+   built without MathML since the fix, but hide any stray layer robustly —
+   display:none involves no positioning and works in every engine. */
+.mp-figure .katex-mathml { display: none; }
+.mp-figure figcaption {
+    margin-top: 0.6em;
+    font-size: 0.88em;
+    color: var(--mp-muted);
+    text-align: center;
+    line-height: 1.5;
+}
+.mp-figure-missing {
+    border: 1px dashed var(--mp-c6);
+    border-radius: 3px;
+    padding: 18px;
+    color: var(--mp-c6);
+}
+
+/* ---------- stat cards (headline numbers row) ---------- */
+
+.mp-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 10px;
+    margin: 1.2em 0;
+}
+.mp-stat {
+    background: var(--mp-fill-soft);
+    border: 1px solid #e7eaed;
+    border-radius: 6px;
+    padding: 12px 14px;
+    text-align: center;
+}
+.mp-stat b {
+    display: block;
+    font-size: 1.5em;
+    line-height: 1.25;
+    color: var(--mp-ink);
+    font-variant-numeric: tabular-nums;
+}
+.mp-stat b.accent { color: var(--mp-accent); }
+.mp-stat span {
+    display: block;
+    margin-top: 2px;
+    font-size: 0.82em;
+    color: var(--mp-muted);
+}
+
+/* ---------- callouts (修正 / 警告 / 注记 / 信息) ---------- */
+
+.mp-callout {
+    border-left: 4px solid var(--mp-accent);
+    background: #f0f6fc;
+    border-radius: 0 3px 3px 0;
+    padding: 10px 15px;
+    margin: 1em 0;
+    font-size: 0.95em;
+}
+.mp-callout > :first-child { margin-top: 0; }
+.mp-callout > :last-child { margin-bottom: 0; }
+.mp-callout .mp-callout-title {
+    display: block;
+    font-weight: bold;
+    margin-bottom: 2px;
+}
+.mp-callout.warn { border-left-color: var(--mp-c6); background: #fdf3ec; }
+.mp-callout.fix  { border-left-color: var(--mp-c3); background: #eefaf4; }
+.mp-callout.note { border-left-color: var(--mp-border); background: var(--mp-fill-soft); }
+
+/* ---------- legend chips (e.g. 实测 vs 估算) ---------- */
+
+.mp-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 16px;
+    justify-content: center;
+    font-size: 0.85em;
+    color: var(--mp-muted);
+    margin: 0.4em 0;
+}
+.mp-chip { display: inline-flex; align-items: center; gap: 6px; }
+.mp-chip i {
+    width: 12px;
+    height: 12px;
+    border-radius: 2px;
+    display: inline-block;
+    background: var(--mp-c1);
+}
+.mp-chip.estimated i { opacity: 0.45; }
+
+/* ---------- collapsible data tables (▸ 表格视图) ---------- */
+
+details.mp-table {
+    margin: 0.8em 0;
+    border: 1px solid var(--mp-border);
+    border-radius: 3px;
+    padding: 8px 14px;
+    background: var(--mp-fill-soft);
+}
+details.mp-table summary {
+    cursor: pointer;
+    color: var(--mp-accent);
+    font-size: 0.9em;
+    font-weight: bold;
+}
+details.mp-table[open] summary { margin-bottom: 0.5em; }
+details.mp-table table { font-size: 0.9em; }
+
+/* ---------- print ---------- */
+
+@media print {
+    .mp-stat { border-color: var(--mp-border); }
+    details.mp-table { display: none; } /* raw data tables don't belong on paper */
+}

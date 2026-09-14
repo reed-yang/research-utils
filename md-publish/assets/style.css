@@ -1,0 +1,287 @@
+/*
+ * md-publish page stylesheet.
+ * Core typography ported from the user's Typora "github" theme (github.css):
+ * same #write column, heading scale/borders, table striping, blockquote, code
+ * chips. Typora app chrome dropped; .md-fences mapped to pre. On top: a CJK
+ * layer (font stack, line-height, native autospace) and TOC/print styles.
+ */
+
+/* ---------- Open Sans (self-hosted, latin + latin-ext, as in the theme) ---------- */
+
+@font-face {
+    font-family: 'Open Sans';
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+    src: url('/assets/fonts/open-sans-latin-400-normal.woff2') format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+    font-family: 'Open Sans';
+    font-style: italic;
+    font-weight: 400;
+    font-display: swap;
+    src: url('/assets/fonts/open-sans-latin-400-italic.woff2') format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+    font-family: 'Open Sans';
+    font-style: normal;
+    font-weight: 700;
+    font-display: swap;
+    src: url('/assets/fonts/open-sans-latin-700-normal.woff2') format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+    font-family: 'Open Sans';
+    font-style: italic;
+    font-weight: 700;
+    font-display: swap;
+    src: url('/assets/fonts/open-sans-latin-700-italic.woff2') format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+/* ---------- Base (theme: html/body) ---------- */
+
+* { box-sizing: border-box; }
+
+html {
+    font-size: 16px;
+    -webkit-font-smoothing: antialiased;
+}
+
+body {
+    margin: 0;
+    font-family: "Open Sans", -apple-system, "Segoe UI", "Helvetica Neue", Helvetica, Arial,
+        "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC",
+        "Noto Sans SC", "Source Han Sans SC", 'Segoe UI Emoji', sans-serif;
+    color: rgb(51, 51, 51);
+    /* theme uses 1.6; raised for hanzi legibility in long mixed-script docs */
+    line-height: 1.75;
+    background: #fff;
+}
+
+/* ---------- Content column (theme: #write) ---------- */
+
+#write {
+    max-width: 860px;
+    margin: 0 auto;
+    padding: 30px;
+    padding-bottom: 100px;
+    overflow-wrap: break-word;
+}
+
+@media only screen and (min-width: 1400px) {
+    #write { max-width: 1024px; }
+}
+
+@media only screen and (min-width: 1800px) {
+    #write { max-width: 1200px; }
+}
+
+#write > *:first-child { margin-top: 0; }
+#write > ul:first-child,
+#write > ol:first-child { margin-top: 30px; }
+
+/* ---------- CJK layer ---------- */
+
+/* Native inter-script spacing (Chrome/Edge 140+, Safari 18.4+, Firefox 145+).
+   Lossless: no characters are inserted into the text. */
+@supports (text-autospace: normal) {
+    #write { text-autospace: normal; }
+    #write pre, #write code, #write .katex { text-autospace: no-autospace; }
+}
+/* CJK punctuation compression (Chromium-only for now; harmless elsewhere) */
+@supports (text-spacing-trim: normal) {
+    #write { text-spacing-trim: normal; }
+}
+
+html[lang^="zh"] #write p { text-align: justify; }
+
+/* ---------- Links, headings (theme values) ---------- */
+
+a { color: #4183C4; text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+h1, h2, h3, h4, h5, h6 {
+    position: relative;
+    margin-top: 1rem;
+    margin-bottom: 1rem;
+    font-weight: bold;
+    line-height: 1.4;
+}
+h1 tt, h1 code, h2 tt, h2 code, h3 tt, h3 code,
+h4 tt, h4 code, h5 tt, h5 code, h6 tt, h6 code { font-size: inherit; }
+
+h1 { font-size: 2.25em; line-height: 1.2; border-bottom: 1px solid #eee; padding-bottom: .2em; }
+h2 { font-size: 1.75em; line-height: 1.225; border-bottom: 1px solid #eee; padding-bottom: .2em; }
+h3 { font-size: 1.5em; line-height: 1.43; }
+h4 { font-size: 1.25em; }
+h5 { font-size: 1em; }
+h6 { font-size: 1em; color: #777; }
+
+/* ---------- Block elements (theme values) ---------- */
+
+p, blockquote, ul, ol, dl, table { margin: 0.8em 0; }
+
+li > ol, li > ul { margin: 0 0; }
+ul, ol { padding-left: 30px; }
+ul:first-child, ol:first-child { margin-top: 0; }
+ul:last-child, ol:last-child { margin-bottom: 0; }
+
+hr {
+    height: 2px;
+    padding: 0;
+    margin: 16px 0;
+    background-color: #e7e7e7;
+    border: 0 none;
+    overflow: hidden;
+    box-sizing: content-box;
+}
+
+blockquote {
+    border-left: 4px solid #dfe2e5;
+    padding: 0 15px;
+    margin-left: 0;
+    margin-right: 0;
+    color: #777777;
+}
+blockquote blockquote { padding-right: 0; }
+
+img { max-width: 100%; }
+
+/* ---------- Tables (theme values) ---------- */
+
+table {
+    padding: 0;
+    word-break: initial;
+    border-collapse: collapse;
+    display: block;
+    overflow-x: auto;
+}
+table tr { border: 1px solid #dfe2e5; margin: 0; padding: 0; }
+table tr:nth-child(2n), thead { background-color: #f8f8f8; }
+table th {
+    font-weight: bold;
+    border: 1px solid #dfe2e5;
+    border-bottom: 0;
+    margin: 0;
+    padding: 6px 13px;
+}
+table td { border: 1px solid #dfe2e5; margin: 0; padding: 6px 13px; }
+table th:first-child, table td:first-child { margin-top: 0; }
+table th:last-child, table td:last-child { margin-bottom: 0; }
+
+/* ---------- Code (theme: code chips + .md-fences → pre) ---------- */
+
+code, tt {
+    border: 1px solid #e7eaed;
+    background-color: #f3f4f4;
+    border-radius: 3px;
+    padding: 0 2px;
+    font-size: 0.9em;
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+        "Liberation Mono", "Sarasa Mono SC", "Noto Sans Mono CJK SC", monospace;
+}
+
+pre {
+    border: 1px solid #e7eaed;
+    background-color: #f8f8f8;
+    border-radius: 3px;
+    padding: 10px 14px;
+    margin-top: 15px;
+    margin-bottom: 15px;
+    overflow-x: auto;
+    line-height: 1.55;
+}
+pre code {
+    border: 0;
+    background: transparent;
+    padding: 0;
+    font-size: 0.9em;
+    white-space: pre;
+}
+
+/* ---------- Task lists (theme: .md-task-list-item) ---------- */
+
+li.task-list-item { list-style-type: none; }
+li.task-list-item input {
+    margin: 0 0.35em 0.25em -1.3em;
+    vertical-align: middle;
+}
+
+/* ---------- Footnotes ---------- */
+
+hr.footnotes-sep { margin-top: 3em; }
+section.footnotes { font-size: 0.9em; color: #555; }
+.footnote-backref { font-family: sans-serif; }
+
+/* ---------- Math (KaTeX rendered at build time) ---------- */
+
+.katex-display, p.katex-block, .katex-block {
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 0.4em 0;
+}
+
+/* ---------- Table of contents ---------- */
+
+/* Inline TOC (narrow viewports): a details block near the top */
+details.toc-inline {
+    background: #fafafa;
+    border: 1px solid #e7eaed;
+    border-radius: 3px;
+    padding: 10px 16px;
+    margin: 0.8em 0 1.6em 0;
+}
+details.toc-inline summary {
+    cursor: pointer;
+    font-weight: bold;
+    color: #555;
+}
+details.toc-inline nav { font-size: 0.92em; }
+
+/* Sidebar TOC: only when the viewport is wide enough that a fixed 250px rail
+   cannot overlap the centered column (860px col → needs ≥1600px with the
+   1400px breakpoint bumping the column to 1024px) */
+nav.toc-side { display: none; }
+
+@media only screen and (min-width: 1600px) {
+    nav.toc-side {
+        display: block;
+        position: fixed;
+        top: 40px;
+        left: 24px;
+        width: 250px;
+        max-height: calc(100vh - 80px);
+        overflow-y: auto;
+        font-size: 0.85em;
+        line-height: 1.5;
+        color: #555;
+        padding-right: 8px;
+        scrollbar-width: thin;
+    }
+    details.toc-inline { display: none; }
+}
+
+nav.toc ul, nav.toc-side ul, details.toc-inline nav ul {
+    list-style: none;
+    padding-left: 0;
+    margin: 0.2em 0;
+}
+nav.toc-side ul ul, details.toc-inline nav ul ul { padding-left: 1.2em; }
+nav.toc-side li, details.toc-inline nav li { margin: 0.25em 0; }
+nav.toc-side a, details.toc-inline nav a { color: #555; }
+nav.toc-side a:hover, details.toc-inline nav a:hover { color: #4183C4; text-decoration: none; }
+
+/* ---------- Print (theme @media print + TOC removal) ---------- */
+
+@media print {
+    html { font-size: 13px; }
+    pre {
+        page-break-inside: avoid;
+        word-wrap: break-word;
+    }
+    nav.toc-side, details.toc-inline { display: none; }
+    #write { max-width: none; padding: 0; }
+}
