@@ -1473,9 +1473,14 @@ def convert_with_glm_ocr(
 
     if use_image_mode:
         # --- Per-page image mode ---
+        # Page concurrency is overridable via GLM_OCR_MAX_WORKERS (default 10).
+        # Lower it (e.g. 3) when the GLM key rate-limits a large multi-page PDF at
+        # the default 10-way fan-out, which fails the whole conversion.
+        _glm_workers = int(os.environ.get("GLM_OCR_MAX_WORKERS", "10") or "10")
         merged_md, merged_layout, merged_data_info, total_usage, cached_page_images = (
             _glm_ocr_via_page_images(
                 pdf_path, auth_token, page_count, render_scale=3.0, debug=debug,
+                max_workers=_glm_workers,
             )
         )
         if total_usage:
@@ -1824,6 +1829,548 @@ def convert_with_glm_ocr(
 
 
 # ============================================================================
+# DeepSeek-OCR Backend (Novita cloud, OpenAI-compatible vision)
+# ============================================================================
+#
+# DeepSeek-OCR-2 is a single-image grounding OCR model served on Novita via the
+# OpenAI-compatible chat.completions endpoint. It does NOT accept PDFs — we
+# render each page to an image and OCR pages concurrently (mirrors GLM-OCR's
+# per-page mode). In grounding mode the model emits typed blocks:
+#
+#     label[[x1, y1, x2, y2]]\n<text/LaTeX content>
+#
+# where coords are normalized to 0-1000 over the original page. A block may
+# carry MULTIPLE bboxes: label[[x1,y1,x2,y2], [x1,y1,x2,y2]] (one logical block
+# spanning two regions). `image`-type blocks are figure regions (empty text) —
+# we crop them from a high-res page render. Every other block keeps its text.
+# Block header: label[[x1,y1,x2,y2]] with coords normalized 0-1000. A block may
+# carry MULTIPLE bboxes: label[[x1,y1,x2,y2], [x1,y1,x2,y2]]. The header is
+# ANCHORED on a 4-integer coord set so in-text letter-adjacent double brackets
+# (LaTeX/tensor indexing W[[i]], footnote ref[[1]], code f[[x]]) can NEVER be
+# mis-parsed as a block (that loosened-regex bug truncated real paper text).
+_DEEPSEEK_INT4 = r"\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*\d+"
+_DEEPSEEK_BLOCK_RE = re.compile(
+    r"([A-Za-z_]+)\[\[\s*("
+    + _DEEPSEEK_INT4
+    + r"(?:\s*\]\s*,\s*\[\s*"
+    + _DEEPSEEK_INT4
+    + r")*)\s*\]\]"
+)
+_DEEPSEEK_COORDS_RE = re.compile(r"(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)")
+# echoed chat-template / grounding control tokens that occasionally leak
+_DEEPSEEK_ECHO_RE = re.compile(r"<\|?/?(?:image|grounding|ref|det)\|?>|<image>")
+# an HTML <table> that lost its row/cell structure (no <tr>) — unparseable blob
+_DEEPSEEK_TABLE_RE = re.compile(r"<table\b.*?</table>", re.IGNORECASE | re.DOTALL)
+_DEEPSEEK_ENDPOINT = (
+    os.environ.get("NOVITA_BASE_URL", "https://api.novita.ai/openai").rstrip("/")
+    + "/chat/completions"
+)
+_DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_OCR_MODEL", "deepseek/deepseek-ocr-2")
+_DEEPSEEK_PROMPT = "<|grounding|>Convert the document to markdown."
+_DEEPSEEK_PROMPT_PLAIN = "Convert the document to markdown."
+# Novita caps deepseek-ocr output at 8192; 8192 itself flakes a 400, so use 8000.
+_DEEPSEEK_MAX_TOKENS = int(os.environ.get("DEEPSEEK_OCR_MAX_TOKENS", "8000") or "8000")
+# PDFium is not thread-safe; serialize every render through this lock.
+import threading as _threading  # noqa: E402
+_DEEPSEEK_PDF_LOCK = _threading.Lock()
+
+
+# --- Global cross-process OCR-request concurrency limit (optional) -----------
+# When OCR_GLOBAL_SLOTS (>=1) + OCR_SLOT_DIR are set, every per-page deepseek OCR
+# HTTP request acquires one of N shared slot files before firing, so the AGGREGATE
+# in-flight request count across ALL concurrent paper subprocesses is bounded to N
+# (the cloud provider's concurrency cap). Single-paper and multi-paper runs draw
+# from the SAME pool: a lone paper can use all N slots; many papers share them.
+# Unset => no-op (standalone skill behaves exactly as before). Mirrors cortex's
+# proven ingest_slots file-semaphore; a slot whose holder PID is dead is
+# reclaimable (cortex SIGKILLs the subprocess group on timeout, skipping release).
+import contextlib as _contextlib  # noqa: E402
+
+
+def _ocr_slots_cfg():
+    try:
+        n = int(os.environ.get("OCR_GLOBAL_SLOTS", "") or "0")
+    except ValueError:
+        n = 0
+    d = (os.environ.get("OCR_SLOT_DIR", "") or "").strip()
+    return (n, d) if (n >= 1 and d) else (0, "")
+
+
+def _ocr_pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _ocr_claim(path: str) -> bool:
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        return False
+    except OSError:
+        return False
+    try:
+        os.write(fd, str(os.getpid()).encode())
+    finally:
+        os.close(fd)
+    return True
+
+
+def _ocr_slot_dead(path: str) -> bool:
+    try:
+        pid = int((Path(path).read_text(encoding="utf-8").strip() or "0"))
+    except (OSError, ValueError):
+        return False
+    return pid > 0 and not _ocr_pid_alive(pid)
+
+
+def _ocr_reclaim_dead(slots_dir: Path, n: int) -> None:
+    """Unlink dead-holder slots, serialized behind a self-healing reclaim mutex."""
+    lock = str(slots_dir / ".reclaim.lock")
+    if not _ocr_claim(lock):
+        if not _ocr_slot_dead(lock):
+            return  # another worker is reclaiming
+        try:
+            os.unlink(lock)
+        except OSError:
+            pass
+        if not _ocr_claim(lock):
+            return
+    try:
+        for i in range(n):
+            sp = str(slots_dir / f"ocr-slot-{i}")
+            if _ocr_slot_dead(sp):
+                try:
+                    os.unlink(sp)
+                except OSError:
+                    pass
+    finally:
+        try:
+            os.unlink(lock)
+        except OSError:
+            pass
+
+
+@_contextlib.contextmanager
+def _ocr_global_slot():
+    """Hold one global OCR slot for the duration of a page request, or no-op when
+    unconfigured. Degrades to UNTHROTTLED (never deadlocks) if no slot frees in
+    time — the limit is best-effort throttling, not a correctness invariant."""
+    n, d = _ocr_slots_cfg()
+    if not n:
+        yield
+        return
+    slots_dir = Path(d)
+    try:
+        slots_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        yield
+        return
+    timeout = float(os.environ.get("OCR_SLOT_ACQUIRE_TIMEOUT", "180") or "180")
+    deadline = time.time() + timeout
+    held = None
+    while time.time() < deadline:
+        for i in range(n):
+            sp = str(slots_dir / f"ocr-slot-{i}")
+            if _ocr_claim(sp):
+                held = sp
+                break
+        if held is not None:
+            break
+        _ocr_reclaim_dead(slots_dir, n)  # free crashed/killed holders, then retry
+        time.sleep(0.3)
+    if held is None:
+        print("DeepSeek-OCR: global slot acquire timed out — proceeding unthrottled",
+              file=sys.stderr)
+        yield
+        return
+    try:
+        yield
+    finally:
+        try:
+            os.unlink(held)
+        except OSError:
+            pass
+
+
+def _deepseek_chat(b64, prompt, api_key, page_num, total_pages):
+    """One grounding/plain OCR request (with retries). Returns (content, usage, finish_reason)."""
+    import requests
+
+    payload = {
+        "model": _DEEPSEEK_MODEL,
+        "temperature": 0.0,
+        "max_tokens": _DEEPSEEK_MAX_TOKENS,
+        "messages": [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+            {"type": "text", "text": prompt},
+        ]}],
+    }
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+
+    max_retries = 3
+    max_rate_limit_retries = 6  # 429s get more patience (backoff 2,4,8,16,32,64s)
+    err_attempts = 0
+    rl_attempts = 0
+    last_error = None
+    while err_attempts < max_retries and rl_attempts < max_rate_limit_retries:
+        try:
+            with _ocr_global_slot():  # global cross-process concurrency cap (optional)
+                resp = requests.post(_DEEPSEEK_ENDPOINT, headers=headers, json=payload, timeout=180)
+            if resp.status_code == 429:
+                rl_attempts += 1
+                wait = 2 ** rl_attempts
+                print(
+                    f"DeepSeek-OCR: Rate limited on page {page_num + 1}, waiting {wait}s "
+                    f"({rl_attempts}/{max_rate_limit_retries})",
+                    file=sys.stderr,
+                )
+                time.sleep(wait)
+                continue
+            if resp.status_code != 200:
+                err_attempts += 1
+                last_error = (
+                    f"DeepSeek-OCR API error on page {page_num + 1}: "
+                    f"{resp.status_code} - {resp.text[:200]}"
+                )
+                if err_attempts < max_retries:
+                    time.sleep(2 ** err_attempts)
+                    continue
+                output_error(last_error)
+            j = resp.json()
+            choice = j.get("choices", [{}])[0]
+            content = choice.get("message", {}).get("content", "") or ""
+            finish = choice.get("finish_reason", "")
+            return content, (j.get("usage", {}) or {}), finish
+        except requests.Timeout:
+            err_attempts += 1
+            last_error = f"DeepSeek-OCR: Page {page_num + 1} timed out (>180s)"
+            if err_attempts < max_retries:
+                time.sleep(2 ** err_attempts)
+                continue
+            output_error(last_error)
+        except requests.RequestException as e:
+            err_attempts += 1
+            last_error = f"DeepSeek-OCR: Page {page_num + 1} request failed: {e}"
+            if err_attempts < max_retries:
+                time.sleep(2 ** err_attempts)
+                continue
+            output_error(last_error)
+    output_error(last_error or f"DeepSeek-OCR: Page {page_num + 1} failed after all retries")
+    return "", {}, ""  # unreachable (output_error exits)
+
+
+def _deepseek_ocr_page(shared_doc, page_num, total_pages, api_key, ocr_scale):
+    """Render (lock-serialized) + OCR one page. Returns (page_num, content, usage, truncated).
+
+    PDFium is NOT thread-safe — even across separate documents — so ALL rendering
+    is serialized under _DEEPSEEK_PDF_LOCK; only the (slow) OCR HTTP call runs
+    concurrently. Rendering one page just-in-time keeps peak RAM ~workers images.
+    """
+    import base64
+
+    with _DEEPSEEK_PDF_LOCK:
+        pil_img = shared_doc[page_num].render(scale=ocr_scale).to_pil()
+        buf = io.BytesIO()
+        pil_img.save(buf, format="JPEG", quality=90)
+        del pil_img  # detach from PDFium-backed bitmap before releasing the lock
+    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    print(
+        f"DeepSeek-OCR: Page {page_num + 1}/{total_pages} (~{len(b64) * 3 // 4 // 1024} KB)",
+        file=sys.stderr,
+    )
+
+    content, usage, finish = _deepseek_chat(b64, _DEEPSEEK_PROMPT, api_key, page_num, total_pages)
+    truncated = finish == "length"
+    if truncated:
+        # Output hit the token cap. Grounding mode spends tokens on bboxes; retry
+        # once in plain mode (fewer tokens, no bbox overhead) to recover content.
+        print(
+            f"DeepSeek-OCR: Page {page_num + 1} hit the {_DEEPSEEK_MAX_TOKENS}-token cap "
+            f"(finish=length); retrying in plain mode to recover text",
+            file=sys.stderr,
+        )
+        p_content, p_usage, p_finish = _deepseek_chat(
+            b64, _DEEPSEEK_PROMPT_PLAIN, api_key, page_num, total_pages
+        )
+        # Merge only the integer token counters; Novita usage also carries
+        # *_details keys whose values are None (None + None would crash).
+        for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            usage[k] = (usage.get(k) or 0) + (p_usage.get(k) or 0)
+        if len(p_content) >= len(content):
+            # Plain retry recovered at least as much — keep it; truncated iff it
+            # too hit the cap.
+            content = p_content
+            truncated = p_finish == "length"
+        else:
+            # Kept the (truncated) grounding content — still truncated.
+            truncated = True
+    return page_num, content, usage, truncated
+
+
+def _deepseek_crop_is_meaningful(pil_crop) -> bool:
+    """Reject near-blank crops (model occasionally marks empty whitespace as image)."""
+    try:
+        lo, hi = pil_crop.convert("L").getextrema()
+        return (hi - lo) > 12
+    except Exception:
+        return True
+
+
+def _deepseek_flag_bad_tables(md):
+    """Prefix a loud warning before any <table> that lost its <tr> row structure,
+    so an unparseable table blob is never emitted silently. Returns (md, n_flagged)."""
+    n = [0]
+
+    def repl(m):
+        block = m.group(0)
+        if "<tr" not in block.lower():
+            n[0] += 1
+            return (
+                "\n<!-- WARNING DeepSeek-OCR: the table below lost its row/column "
+                "structure (no <tr>/<td>); verify against the source PDF -->\n" + block
+            )
+        return block
+
+    out = _DEEPSEEK_TABLE_RE.sub(repl, md)
+    return out, n[0]
+
+
+def _deepseek_page_has_figure(raw):
+    """True if the page's raw output contains at least one croppable image block."""
+    for m in _DEEPSEEK_BLOCK_RE.finditer(raw or ""):
+        label = m.group(1).lower()
+        if ("image" in label) or label in ("figure", "picture", "chart"):
+            return True
+    return False
+
+
+def _deepseek_parse_page(
+    raw, crop_img, assets_dir, image_format, image_quality, image_lossless, counter
+):
+    """Parse typed grounding blocks into markdown; crop `image` blocks from crop_img.
+
+    crop_img may be None when the page has no figure blocks. counter is a
+    single-element list (shared mutable image counter across pages).
+    """
+    raw = raw or ""
+    matches = list(_DEEPSEEK_BLOCK_RE.finditer(raw))
+    if not matches:
+        # No grounding blocks — model returned plain markdown (or a mode whose
+        # coords we don't recognize). Keep the text; figures, if any, are not
+        # cropped. The caller logs this so figure-loss is never silent.
+        return _DEEPSEEK_ECHO_RE.sub("", raw).strip()
+
+    crop_format = "png" if image_format == "source" else image_format
+    target_ext = get_image_extension(crop_format, ".png", default_for_source=".png")
+    cw, ch = crop_img.size if crop_img is not None else (0, 0)
+    parts = []
+    for i, m in enumerate(matches):
+        label = m.group(1).lower()
+        coord_sets = _DEEPSEEK_COORDS_RE.findall(m.group(2))
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(raw)
+        content = _DEEPSEEK_ECHO_RE.sub("", raw[start:end]).strip()
+        is_figure = ("image" in label) or label in ("figure", "picture", "chart")
+        if is_figure:
+            cropped_ok = False
+            if coord_sets and crop_img is not None:
+                # Union of all bboxes for this block, mapped 0-1000 -> crop pixels.
+                xs1 = [int(c[0]) for c in coord_sets]
+                ys1 = [int(c[1]) for c in coord_sets]
+                xs2 = [int(c[2]) for c in coord_sets]
+                ys2 = [int(c[3]) for c in coord_sets]
+                cx1 = max(0, round(min(xs1) / 1000 * cw))
+                cy1 = max(0, round(min(ys1) / 1000 * ch))
+                cx2 = min(cw, round(max(xs2) / 1000 * cw))
+                cy2 = min(ch, round(max(ys2) / 1000 * ch))
+                if cx2 - cx1 >= 8 and cy2 - cy1 >= 8:
+                    crop = crop_img.crop((cx1, cy1, cx2, cy2))
+                    if _deepseek_crop_is_meaningful(crop):
+                        counter[0] += 1
+                        name = f"image_{counter[0]:03d}{target_ext}"
+                        save_pil_image(
+                            crop, assets_dir / name, crop_format, image_quality, image_lossless
+                        )
+                        parts.append(f"![Figure {counter[0]}](./assets/{name})")
+                        cropped_ok = True
+            if not cropped_ok:
+                # Figure region we could not crop — leave a visible placeholder so
+                # the figure is never silently dropped.
+                parts.append("<!-- figure region (not croppable) -->")
+            if content:
+                parts.append(content)
+        elif content:
+            parts.append(content)
+    return "\n\n".join(parts)
+
+
+def convert_with_deepseek_ocr(
+    pdf_path, assets_dir, image_format, image_quality, image_lossless, debug=False
+):
+    """Convert a PDF to Markdown via DeepSeek-OCR-2 on Novita (per-page grounding OCR).
+
+    DeepSeek-OCR is a single-image model: each worker renders its OWN page and
+    OCRs it in grounding mode (typed blocks with 0-1000 bboxes). `image` blocks
+    are cropped from a high-res render; all other text/LaTeX is kept. Truncation,
+    empty pages, malformed tables, and uncroppable figures are surfaced (never
+    silently dropped). Requires NOVITA_API_KEY (Novita OpenAI-compatible key).
+
+    Returns (markdown_content, detected_title).
+    """
+    import pypdfium2 as pdfium
+
+    global _conversion_metadata
+
+    api_key = os.environ.get("NOVITA_API_KEY", "").strip()
+    if not api_key:
+        output_error(
+            "NOVITA_API_KEY is not set",
+            "Set NOVITA_API_KEY (Novita OpenAI-compatible key) in the environment "
+            "or paper-ingestion/.env. Get one at https://novita.ai",
+        )
+
+    image_format = normalize_image_format(image_format)
+    image_quality = clamp_image_quality(image_quality)
+    page_count = get_pdf_page_count(pdf_path)
+    if page_count > 100:
+        output_error(
+            f"PDF has {page_count} pages (DeepSeek-OCR cap: 100 pages)",
+            "Try --engine mineru or --engine docling for very large PDFs.",
+        )
+
+    workers = int(os.environ.get("DEEPSEEK_OCR_MAX_WORKERS", "4") or "4")
+    ocr_scale = float(os.environ.get("DEEPSEEK_OCR_RENDER_SCALE", "3.0") or "3.0")
+    crop_scale = float(os.environ.get("DEEPSEEK_OCR_CROP_SCALE", "4.0") or "4.0")
+
+    # One shared PdfDocument for the whole run: rendered lock-serialized by the
+    # OCR workers (PDFium isn't thread-safe), then reused single-threaded for crops.
+    shared_doc = pdfium.PdfDocument(str(pdf_path))
+    try:
+        actual_pages = min(page_count, len(shared_doc)) if page_count else len(shared_doc)
+
+        _conversion_metadata = {
+            "backend": "deepseek-ocr",
+            "mode": "cloud",
+            "model": _DEEPSEEK_MODEL,
+            "page_count": page_count,
+            "image_format": image_format,
+            "image_quality": image_quality,
+            "image_lossless": image_lossless,
+        }
+
+        print(
+            f"DeepSeek-OCR: OCR {actual_pages} pages with {workers} concurrent workers",
+            file=sys.stderr,
+        )
+        results = {}
+        truncated_pages = []
+        total_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(
+                    _deepseek_ocr_page, shared_doc, pg, actual_pages, api_key, ocr_scale
+                ): pg
+                for pg in range(actual_pages)
+            }
+            for future in as_completed(futures):
+                pg, content, usage, truncated = future.result()
+                results[pg] = content
+                if truncated:
+                    truncated_pages.append(pg)
+                for k in total_usage:
+                    total_usage[k] += usage.get(k, 0)
+
+        if total_usage["total_tokens"]:
+            _conversion_metadata["usage"] = total_usage
+
+        assets_dir.mkdir(parents=True, exist_ok=True)
+        counter = [0]
+        md_parts = []
+        empty_pages = []
+        plain_pages = []
+        bad_tables = 0
+        # Single-threaded merge (all workers done): render the crop image lazily,
+        # only for pages with a figure, then discard it (peak RAM ~1 crop image).
+        for pg in range(actual_pages):
+            raw = results.get(pg, "")
+            if not (raw or "").strip():
+                empty_pages.append(pg)
+                md_parts.append(
+                    f"<!-- WARNING DeepSeek-OCR: page {pg + 1} returned no content -->"
+                )
+                continue
+            if not _DEEPSEEK_BLOCK_RE.search(raw):
+                plain_pages.append(pg)  # no grounding blocks (figures not cropped)
+            crop_img = None
+            if _deepseek_page_has_figure(raw):
+                crop_img = shared_doc[pg].render(scale=crop_scale).to_pil()
+            page_md = _deepseek_parse_page(
+                raw, crop_img, assets_dir,
+                image_format, image_quality, image_lossless, counter,
+            )
+            page_md, flagged = _deepseek_flag_bad_tables(page_md)
+            bad_tables += flagged
+            if truncated_pages and pg in truncated_pages:
+                page_md += (
+                    f"\n\n<!-- WARNING DeepSeek-OCR: page {pg + 1} output hit the token "
+                    f"cap and may be truncated -->"
+                )
+            if page_md.strip():
+                md_parts.append(page_md)
+    finally:
+        shared_doc.close()
+    markdown_content = "\n\n".join(md_parts)
+
+    # Surface every degradation so nothing fails silently.
+    if truncated_pages:
+        print(
+            f"DeepSeek-OCR: WARNING {len(truncated_pages)} page(s) may be truncated "
+            f"(hit token cap): pages {[p + 1 for p in truncated_pages]}",
+            file=sys.stderr,
+        )
+    if empty_pages:
+        print(
+            f"DeepSeek-OCR: WARNING {len(empty_pages)} page(s) returned empty: "
+            f"pages {[p + 1 for p in empty_pages]}",
+            file=sys.stderr,
+        )
+    if plain_pages:
+        print(
+            f"DeepSeek-OCR: WARNING {len(plain_pages)} page(s) had no grounding blocks "
+            f"(plain text, figures not cropped): pages {[p + 1 for p in plain_pages]}",
+            file=sys.stderr,
+        )
+    if bad_tables:
+        print(
+            f"DeepSeek-OCR: WARNING {bad_tables} table(s) lost row/column structure "
+            f"(flagged inline)",
+            file=sys.stderr,
+        )
+    _conversion_metadata["degradations"] = {
+        "truncated_pages": [p + 1 for p in truncated_pages],
+        "empty_pages": [p + 1 for p in empty_pages],
+        "plain_pages": [p + 1 for p in plain_pages],
+        "malformed_tables": bad_tables,
+    }
+
+    if not markdown_content.strip():
+        output_error(
+            "DeepSeek-OCR returned empty markdown",
+            "The PDF may be unreadable, or the Novita endpoint rejected the pages.",
+        )
+
+    detected_title = extract_title_from_markdown(markdown_content)
+    return markdown_content, detected_title
+
+
+# ============================================================================
 # File Organization
 # ============================================================================
 
@@ -1925,9 +2472,9 @@ def main():
     parser.add_argument(
         "--engine",
         type=str,
-        choices=["mineru", "docling", "glm-ocr"],
+        choices=["mineru", "docling", "glm-ocr", "deepseek-ocr"],
         default="glm-ocr",
-        help="Conversion engine: glm-ocr (default, cloud API, no GPU needed), mineru (highest quality, GPU), docling (fallback, fast)",
+        help="Conversion engine: glm-ocr (default, cloud API, no GPU needed), deepseek-ocr (Novita cloud, cheap vision OCR), mineru (highest quality, GPU), docling (fallback, fast)",
     )
     parser.add_argument(
         "--output-dir",
@@ -2030,6 +2577,15 @@ def main():
                 image_lossless,
                 debug=args.debug,
                 source_url=glm_source_url,
+            )
+        elif engine == "deepseek-ocr":
+            markdown_content, detected_title = convert_with_deepseek_ocr(
+                pdf_path,
+                temp_assets,
+                image_format,
+                image_quality,
+                image_lossless,
+                debug=args.debug,
             )
 
         # Normalize math delimiters to $...$ / $$...$$
@@ -2141,11 +2697,25 @@ def main():
             print(f"  Image Quality: {meta.get('image_quality', image_quality)}", file=sys.stderr)
             if meta.get("image_lossless", image_lossless):
                 print("  Image Lossless: true", file=sys.stderr)
+        elif engine == "deepseek-ocr":
+            meta = get_conversion_metadata()
+            print(f"  Backend: DeepSeek-OCR (Novita cloud, {meta.get('model')})", file=sys.stderr)
+            print(f"  Pages: {meta.get('page_count', 'unknown')}", file=sys.stderr)
+            usage = meta.get("usage")
+            if usage:
+                tot = usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0)
+                print(f"  Prompt Tokens:     {usage.get('prompt_tokens', 0):,}", file=sys.stderr)
+                print(f"  Completion Tokens: {usage.get('completion_tokens', 0):,}", file=sys.stderr)
+                print(f"  Est. Cost: ${tot / 1e6 * 0.03:.5f} (@ $0.03/M in+out)", file=sys.stderr)
+            print(f"  Image Format: {meta.get('image_format', image_format)}", file=sys.stderr)
+            print(f"  Image Quality: {meta.get('image_quality', image_quality)}", file=sys.stderr)
+            if meta.get("image_lossless", image_lossless):
+                print("  Image Lossless: true", file=sys.stderr)
 
         print(f"  Total Time: {elapsed_time:.2f}s", file=sys.stderr)
 
         # Calculate pages per second if we have page count
-        if engine in ("mineru", "glm-ocr"):
+        if engine in ("mineru", "glm-ocr", "deepseek-ocr"):
             meta = get_conversion_metadata()
             page_count = meta.get("page_count", 0)
             if page_count > 0 and elapsed_time > 0:
