@@ -1,6 +1,10 @@
 ---
 name: paper-ingestion
 description: Ingest PDF research papers and convert to Markdown for AI-native analysis. Use when user wants to read, analyze, or process a PDF paper, or provides a PDF URL/path. Uses GLM-OCR (cloud) by default, MinerU (GPU) or docling as alternatives.
+metadata:
+  cortex-capability: ocr
+  cortex-entry: scripts/ingest_paper.py
+  cortex-interpreter: .venv/bin/python
 ---
 
 # Paper Ingestion Tool
@@ -106,6 +110,16 @@ aliases: []
 ```json
 {"status": "error", "message": "...", "suggestion": "..."}
 ```
+
+## Cortex OCR Capability
+
+The `metadata` block above declares this skill as the `ocr` capability for
+Cortex. Cortex runs `.venv/bin/python -B scripts/ingest_paper.py <pdf> --engine
+<name> --output-dir <dir> --image-format png` and reads `markdown_path` and
+`paper_dir` from the JSON result, so keep that command line and those fields
+stable. Cortex pins a digest of this directory when the operator accepts it;
+any change here needs `uv sync --frozen` if dependencies moved, then a fresh
+`cortex skills accept`.
 
 ## Cloud Engine Configuration (GLM-OCR)
 
