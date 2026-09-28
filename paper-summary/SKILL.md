@@ -19,7 +19,7 @@ Generate priority-first summaries of research papers with keyword extraction. Re
 
 Typical workflow: `paper-ingestion` -> **`summary`** -> `paper-translate` / `paper-validator`
 
-Input: A paper directory produced by `paper-ingestion`, containing `full_text.md` (and optionally `full_text_zh.md` after translation).
+Input: The `markdown_path` returned by `paper-ingestion`, normally `full_text-{paper_name}.md`, or its paper directory. Legacy `full_text.md` is also supported.
 
 ## Default Behavior
 
@@ -70,14 +70,14 @@ By default, do **not** spend summary budget on:
 
 ### Step 1: Locate Paper Files
 
-- User provides a paper directory path or `full_text.md` path
-- Confirm the directory contains `full_text.md`
-- Check if `full_text_zh.md` exists (for keyword backfill only)
+- Prefer the supplied original Markdown path or ingestion JSON's `markdown_path`.
+- For a directory, locate its single `full_text-{paper_name}.md` or legacy `full_text.md`. Exclude translated files ending in lowercase two-letter suffixes such as `_ch.md` or `_zh.md`. If multiple originals remain, ask which one to use instead of guessing.
+- Check for matching `<original_stem>_ch.md` or `<original_stem>_zh.md` translations (for keyword backfill only).
 
 ### Step 2: Read Paper Content
 
-- Read `full_text.md` only
-- Do not use `full_text_zh.md` as the source for summarization
+- Read the resolved original Markdown only.
+- Do not use a translated Markdown file as the source for summarization.
 
 ### Step 3: Generate Summary
 
@@ -98,8 +98,8 @@ The summary should emphasize importance, novelty, motivation, mechanism, and mai
 
 ### Step 6: Backfill Keywords to Tags
 
-- Append extracted keywords to the `tags:` list in the YAML frontmatter of `full_text.md`
-- If `full_text_zh.md` exists, append the same keywords there too
+- Append extracted keywords to the `tags:` list in the resolved original's YAML frontmatter.
+- If its matching Chinese translation exists, append the same keywords there too.
 - Do not modify any content outside YAML frontmatter
 
 ## Output Format
@@ -174,7 +174,7 @@ Examples:
 
 ## Keyword Backfill Rules
 
-Backfill means appending extracted keywords into the `tags:` list in the YAML frontmatter of `full_text.md` (and `full_text_zh.md` if it exists). Insert keywords before the `aliases:` line.
+Backfill means appending extracted keywords into the `tags:` list in the resolved original's YAML frontmatter (and its matching `_ch.md` or `_zh.md` translation if present). Insert keywords before the `aliases:` line.
 
 If `tags:` already contains entries beyond `paper`, assume keywords were already backfilled and skip.
 

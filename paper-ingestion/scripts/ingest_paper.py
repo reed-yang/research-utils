@@ -119,6 +119,95 @@ def extract_title_from_markdown(markdown_content: str) -> str | None:
     return None
 
 
+def paper_name_for_title(title: str, short_name: str | None = None) -> str:
+    """Reuse a supplied method name or a short title prefix for the body filename."""
+    candidate = title
+    if short_name is not None:
+        candidate = short_name
+    else:
+        prefix = re.split(r"[:：]", title, maxsplit=1)[0].strip()
+        if prefix and len(prefix) <= 60 and len(prefix.split()) <= 8:
+            candidate = prefix
+    candidate = re.sub(r"[\u2010-\u2015\u2212]", "-", candidate)
+    candidate = re.sub(r"[^\w.\-]+", "_", candidate).strip("_.-")
+    # Bound UTF-8 bytes, retaining meaningful hyphens and version numbers.
+    candidate = candidate.encode("utf-8")[:120].decode("utf-8", errors="ignore").rstrip("_.-")
+    if not candidate:
+        raise ValueError("Paper name must contain letters or numbers")
+    # The translation tool appends a lowercase two-letter language suffix.
+    if re.search(r"_[a-z]{2}$", candidate):
+        candidate += "-paper"
+    return candidate
+
+
+def infer_paper_method(markdown_content: str) -> dict | None:
+    """Find one author-introduced name in the abstract or introduction."""
+    text = markdown_content[:24000]
+    text = re.sub(r"\A---\s*\n.*?\n---\s*\n", "", text, count=1, flags=re.DOTALL)
+    text = re.sub(r"```.*?```|~~~.*?~~~", "", text, flags=re.DOTALL)
+    text = re.sub(r"(?m)^\s*>.*$", "", text)
+    headings = list(re.finditer(r"(?m)^[ \t]*(?:#{1,6}[ \t]+(.+)|((?:\d+\.?[ \t]+)?(?:Abstract|Introduction|Related Work|References)))[ \t]*$", text))
+    passages = []
+    for index, heading in enumerate(headings):
+        label = re.sub(r"^\d+(?:\.\d+)*\.?\s*", "", heading.group(1) or heading.group(2)).strip().casefold()
+        if label in {"abstract", "introduction"}:
+            end = headings[index + 1].start() if index + 1 < len(headings) else len(text)
+            passages.append((0 if label == "abstract" else 1, text[heading.end():end]))
+    if not passages:
+        # Unstructured OCR: inspect only the opening, stopping before other work.
+        opening = re.split(r"(?im)^[ \t]*(?:#{1,6}\s*)?(?:\d+\.?\s*)?(?:related work|references|bibliography)\b", text, maxsplit=1)[0]
+        passages = [(2, opening[:8000])]
+
+    token = r"[A-Z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)*"
+    name = rf"(?P<name>{token}(?:\s+{token}){{0,3}}(?:\s+[vV]?\d+(?:\.\d+)*)?)"
+    verb = r"(?i:\bwe\s+(?:here\s+)?(?:introduce|present|propose|develop)\s+)"
+    patterns = [
+        re.compile(verb + name),
+        re.compile(verb + r"(?i:(?:a|an|our)\b[^.!?;\n]{0,180}?\b(?:called|named|dubbed)\s+)" + name),
+        re.compile(verb + r"(?i:(?:a|an|our)\b[^.!?;\n]{0,120}?\b(?:model|method|framework|system|approach)\s*[,:(]\s*)" + name),
+        re.compile(r"(?i:\bour\s+(?:model|method|framework|system|approach)(?:\s+(?:is\s+)?(?:called|named))?\s*[,:(]?\s*)" + name),
+    ]
+    candidates = {}
+    for _, passage in sorted(passages, key=lambda item: item[0]):
+        passage = re.sub(r"[\u2010-\u2015\u2212]", "-", passage)
+        passage = re.sub(r"(?<=\w)-\s*\n\s*(?=\w)", "-", passage)
+        passage = re.sub(r"[*`]", "", passage)
+        passage = re.sub(r"\s+", " ", passage)
+        for pattern in patterns:
+            for match in pattern.finditer(passage):
+                candidate = match.group("name").strip()
+                alias = re.match(r"\s*\(\s*" + name + r"\s*\)", passage[match.end():])
+                if alias and len(alias.group("name")) < len(candidate):
+                    candidate = alias.group("name")
+                if candidate.split()[0].casefold() in {"a", "an", "the", "this", "our", "we"}:
+                    continue
+                distinctive = "-" in candidate or "_" in candidate or sum(c.isupper() for c in candidate) > 1
+                following = passage[match.end():match.end() + 3].lstrip()
+                if not distinctive and not following.startswith((",", ":", "(", "-")):
+                    continue
+                if len(candidate) > 80:
+                    continue
+                end = passage.find(". ", match.end())
+                evidence = passage[match.start():min(end + 1 if end >= 0 else len(passage), match.start() + 300)]
+                candidates.setdefault(candidate.casefold(), {"name": candidate, "evidence": evidence})
+        # Prefer the abstract's central contribution over introductory components.
+        if candidates:
+            break
+    return next(iter(candidates.values())) if len(candidates) == 1 else None
+
+
+def resolve_paper_name(title: str, markdown_content: str, short_name: str | None = None) -> dict:
+    if short_name is not None:
+        return {"paper_name": paper_name_for_title(title, short_name),
+                "paper_name_source": "explicit", "paper_name_evidence": short_name}
+    method = infer_paper_method(markdown_content)
+    if method:
+        return {"paper_name": paper_name_for_title(title, method["name"]),
+                "paper_name_source": "author_introduction", "paper_name_evidence": method["evidence"]}
+    return {"paper_name": paper_name_for_title(title),
+            "paper_name_source": "title", "paper_name_evidence": title}
+
+
 def extract_pdf_metadata_title(pdf_path: Path) -> str | None:
     """Extract title from PDF metadata if available."""
     try:
@@ -2382,6 +2471,7 @@ def setup_paper_directory(
     detected_title: str | None,
     output_dir: str | None = None,
     allow_duplicate: bool = False,
+    paper_name: str | None = None,
 ) -> dict:
     """
     Organize files with timestamped folder naming.
@@ -2389,7 +2479,7 @@ def setup_paper_directory(
     Structure:
       {cwd}/{YYYYMMDD}-{Sanitized_Title}/
         reference.pdf    - Original PDF (copied)
-        full_text.md     - Converted Markdown with YAML frontmatter
+        full_text-Name.md - Converted Markdown with YAML frontmatter
         notes.md         - Empty file for analysis notes
         assets/          - Extracted images (if any)
     """
@@ -2400,6 +2490,8 @@ def setup_paper_directory(
     # Use detected title or fall back to filename
     title_source = detected_title if detected_title else pdf_path.stem
     sanitized_title = sanitize_filename(title_source)
+    name_metadata = resolve_paper_name(title_source, markdown_content, paper_name)
+    body_name = name_metadata["paper_name"]
 
     output_root = get_output_root(output_dir)
 
@@ -2413,6 +2505,15 @@ def setup_paper_directory(
     # Create timestamped folder name
     folder_name = f"{date_str}-{sanitized_title}"
     paper_dir = output_root / folder_name
+    full_text_path = paper_dir / f"full_text-{body_name}.md"
+    originals = [paper_dir / "full_text.md", *paper_dir.glob("full_text-*.md")]
+    conflicts = [path for path in originals if path.exists() and path != full_text_path
+                 and not re.search(r"_[a-z]{2}\.md$", path.name)]
+    if conflicts:
+        output_error(
+            "An original already exists with another filename: " + ", ".join(path.name for path in conflicts),
+            "Use a new output directory or explicitly rename the existing original before re-ingesting",
+        )
 
     # Create directory
     paper_dir.mkdir(parents=True, exist_ok=True)
@@ -2426,7 +2527,10 @@ def setup_paper_directory(
         detected_title if detected_title else sanitized_title.replace("_", " ")
     )
     frontmatter = f"""---
-title: "{display_title}"
+title: {json.dumps(display_title, ensure_ascii=False)}
+paper_name: {json.dumps(body_name, ensure_ascii=False)}
+paper_name_source: {json.dumps(name_metadata["paper_name_source"])}
+paper_name_evidence: {json.dumps(name_metadata["paper_name_evidence"], ensure_ascii=False)}
 date_ingested: {date_iso}
 source_pdf: reference.pdf
 conversion_engine: {engine}
@@ -2438,7 +2542,6 @@ aliases: []
 """
 
     # Save Markdown with frontmatter
-    full_text_path = paper_dir / "full_text.md"
     full_text_path.write_text(frontmatter + markdown_content, encoding="utf-8")
 
     # Create empty notes file
@@ -2452,6 +2555,9 @@ aliases: []
         "reference_pdf": str(reference_pdf),
         "notes_path": str(notes_path),
         "title": sanitized_title,
+        "paper_name": body_name,
+        "paper_name_source": name_metadata["paper_name_source"],
+        "paper_name_evidence": name_metadata["paper_name_evidence"],
         "date": date_iso,
     }
 
@@ -2482,6 +2588,12 @@ def main():
         type=str,
         default=None,
         help="Output directory (default: current working directory)",
+    )
+    parser.add_argument(
+        "--paper-name",
+        type=str,
+        default=None,
+        help="Verified name for full_text-<name>.md (default: author-introduced method, then title prefix or title)",
     )
     parser.add_argument(
         "--images-scale",
@@ -2621,6 +2733,7 @@ def main():
             resolved_title,
             args.output_dir,
             args.force,
+            paper_name=args.paper_name,
         )
 
         # Move assets to final location
@@ -2636,6 +2749,9 @@ def main():
             "markdown_path": paths["markdown_path"],
             "engine_used": engine,
             "title": paths["title"],
+            "paper_name": paths["paper_name"],
+            "paper_name_source": paths["paper_name_source"],
+            "paper_name_evidence": paths["paper_name_evidence"],
             "date": paths["date"],
             "paper_dir": paths["paper_dir"],
         }

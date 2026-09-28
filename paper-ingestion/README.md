@@ -57,6 +57,9 @@ uv run scripts/ingest_paper.py "https://arxiv.org/pdf/2512.05905"
 
 # Process a local file
 uv run scripts/ingest_paper.py papers/my_paper.pdf
+
+# Supply an established method name that differs from the formal title
+uv run scripts/ingest_paper.py papers/my_paper.pdf --paper-name "LingBot-VA"
 ```
 
 **How GLM-OCR routing works:**
@@ -97,12 +100,22 @@ Papers are organized in timestamped folders:
 ```text
 ./20260202-My_Research_Paper_Title/
 ├── reference.pdf       # Original PDF
-├── full_text.md        # Converted Markdown (with YAML frontmatter)
+├── full_text-My_Research_Paper_Title.md # Converted Markdown (with YAML frontmatter)
 ├── notes.md            # Empty notes file for your analysis
 └── assets/             # Extracted figures and images
     ├── image_001.webp
     └── image_002.webp
 ```
+
+The original Markdown is named `full_text-{paper_name}.md`. By default the name
+extracts a unique author-introduced method from the OCR abstract or introduction,
+including an explicitly paired short alias. For example, a formal title without
+`LingBot-VA` can still produce `full_text-LingBot-VA.md` from its abstract.
+Missing or ambiguous evidence falls back to a short title prefix before a colon,
+then the descriptive title. Use `--paper-name` for a verified name. Hyphens
+and version numbers are preserved; spaces become underscores. The JSON output
+includes `paper_name`, its source/evidence and the actual `markdown_path`. Existing papers are
+not automatically renamed; `--force` refuses a competing original filename.
 
 ## Performance
 

@@ -7,6 +7,13 @@ description: Translate research paper markdown files to Chinese while preserving
 
 Translate research paper markdown files (from paper-ingestion) to Chinese while preserving all formatting.
 
+Use the ingestion result's actual `markdown_path`, including descriptive names
+such as `full_text-Faster-WAM.md`. The translator preserves the input stem and
+appends the language suffix: Chinese produces `full_text-Faster-WAM_ch.md`.
+Legacy `full_text.md` inputs continue to work. When given only a directory,
+select its single original, excluding lowercase two-letter translation suffixes;
+ask which original to use if the directory is ambiguous.
+
 ## Environment Setup
 
 ```bash
@@ -64,8 +71,8 @@ The translated file is saved alongside the original:
 ```
 20260202-Paper_Title/
   reference.pdf        # Original PDF
-  full_text.md         # Original markdown
-  full_text_ch.md      # Translated markdown
+  full_text-Faster-WAM.md    # Original markdown
+  full_text-Faster-WAM_ch.md # Translated markdown
   notes.md             # Notes file
   assets/              # Images (unchanged)
 ```
